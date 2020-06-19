@@ -35,6 +35,7 @@ type (
 			Min    int           `default:"2"`
 			Max    int           `default:"4"`
 			MinAge time.Duration `default:"55m" split_words:"true"`
+			Clean  bool          `default:"false"`
 		}
 
 		Check struct {

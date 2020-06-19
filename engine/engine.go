@@ -101,6 +101,7 @@ func New(
 			max:     config.Pool.Max,
 			cap:     config.Agent.Concurrency,
 			labels:  config.Agent.Labels,
+			clean:   config.Pool.Clean,
 		},
 		reaper: &reaper{
 			servers:  servers,

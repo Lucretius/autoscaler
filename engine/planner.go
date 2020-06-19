@@ -30,6 +30,7 @@ type planner struct {
 	buffer  int           // buffer capacity to have warm and ready
 	ttu     time.Duration // minimum server age
 	labels  map[string]string
+	clean   bool          // flag to cycle servers past min_age
 
 	client  drone.Client
 	servers autoscaler.ServerStore
@@ -81,11 +82,12 @@ func (p *planner) Plan(ctx context.Context) error {
 	// if the server differential to handle the build volume
 	// is positive, we can reduce server capacity.
 	if diff < 0 {
-		return p.mark(ctx,
+		_, err = p.mark(ctx,
 			// we should adjust the desired capacity to ensure
 			// we maintain the minimum required server count.
 			serverFloor(servers, abs(diff), p.min),
 		)
+		return err
 	}
 
 	// if the server differential to handle the build volume
@@ -97,6 +99,20 @@ func (p *planner) Plan(ctx context.Context) error {
 			serverCeil(servers, diff, p.max),
 		)
 	}
+
+	// if there is no server differential, but DRONE_POOL_CLEAN is
+	// is enabled, we clean up the oldest server (if older than
+	// the min age) and create a new one in its place.  Do this
+	// to a max of one server per plan run.
+	// If only a single server is running this may temporarily
+	// result in 0 available servers while the new one spins up.
+	if diff == 0 && p.clean && servers > 0 {
+		count, err := p.mark(ctx, 1)
+		if err != nil {
+			return p.alloc(ctx, count)
+		}
+		return err
+	  }
 
 	log.Debugln("no capacity changes required")
 
@@ -127,19 +143,19 @@ func (p *planner) alloc(ctx context.Context, n int) error {
 }
 
 // helper function marks instances for termination.
-func (p *planner) mark(ctx context.Context, n int) error {
+func (p *planner) mark(ctx context.Context, n int) (int, error) {
 	logger := logger.FromContext(ctx)
 	logger.Debugf("terminate %d servers", n)
 
 	if n == 0 {
-		return nil
+		return 0, nil
 	}
 
 	servers, err := p.servers.ListState(ctx, autoscaler.StateRunning)
 	if err != nil {
 		logger.WithError(err).
 			Errorln("cannot fetch server list")
-		return err
+		return 0, err
 	}
 	sort.Sort(sort.Reverse(byCreated(servers)))
 
@@ -147,7 +163,7 @@ func (p *planner) mark(ctx context.Context, n int) error {
 	if err != nil {
 		logger.WithError(err).
 			Errorln("cannot ascertain busy server list")
-		return err
+		return 0, err
 	}
 
 	var idle []*autoscaler.Server
@@ -183,6 +199,7 @@ func (p *planner) mark(ctx context.Context, n int) error {
 	if len(idle) > n {
 		idle = idle[:n]
 	}
+	markedServers := 0
 
 	for _, server := range idle {
 		server.State = autoscaler.StateShutdown
@@ -192,10 +209,12 @@ func (p *planner) mark(ctx context.Context, n int) error {
 				WithField("server", server.Name).
 				WithField("state", "shutdown").
 				Errorln("cannot update server state")
+		} else {
+			markedServers++
 		}
 	}
 
-	return nil
+	return markedServers, nil
 }
 
 // helper function returns the number of pending and
